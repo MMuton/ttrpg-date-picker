@@ -16,8 +16,8 @@ const path = require('path');
 // Config
 const USERS_FILE = path.join(__dirname, 'users.json');
 const GAMES_FILE = path.join(__dirname, 'games.json');
-const SESSION_SECRET = 'replace_with_strong_secret';
-const GM_SECRET = 'myGMSecret123';
+const SESSION_SECRET = '54324356345453';
+const GM_SECRET = 'yatameansyarraktassak';
 const SALT_ROUNDS = 10;
 
 // Helpers
