@@ -93,7 +93,7 @@ async function sendDiscordWebhook(game, selectedDay, mentionText = '') {
   if (!game.webhookUrl) return;
   
   try {
-    const baseMessage = `**Game Session Scheduled!**\n📅 Game: ${game.name}\n📆 Date: ${selectedDay}\n👥 Players: ${game.players.join(', ')}`;
+    const baseMessage = `**Game Session Scheduled!**\n📅 Game: ${game.name}\n📅 Day: Next ${selectedDay}\n👥 Players: ${game.players.join(', ')}`;
     const fullMessage = mentionText ? `${mentionText}\n\n${baseMessage}` : baseMessage;
     
     await axios.post(game.webhookUrl, {
@@ -160,7 +160,12 @@ function renderPage(title, bodyHtml, hideLogout = false) {
     .day-option{display:inline-block;margin:.5rem;padding:.5rem 1rem;border-radius:4px;color:#fff;font-weight:bold;text-decoration:none;transition:transform .1s;}
     .day-option:hover{transform:scale(1.05);}
     .day-option:active{transform:scale(0.95);}
-    .selected-day{background:#4CAF50;color:#000;}
+    .selected-day {
+      background: #4CAF50;
+      color: #000;
+      border: 2px solid #4CAF50;
+      box-shadow: 0 0 8px 2px rgba(76, 175, 80, 0.7);
+    }
     .schedule-button{background:#4CAF50;color:#fff;padding:.75rem 1.5rem;border:none;border-radius:4px;font-weight:bold;margin-top:1rem;cursor:pointer;}
     .schedule-button:hover{background:#45a049;}
     /* Effects */
