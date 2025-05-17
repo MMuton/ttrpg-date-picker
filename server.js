@@ -2,7 +2,7 @@
  * server.js
  * TTRPG Date Picker with Auth, Multi-Game Support, GM Effects, User Management
  * Updated: Added "keep me logged in", common availability analysis, GM date selection, 
- *          Discord webhook integration, and back buttons for error pages
+ *          Discord webhook integration with @mention support, blue matching days, and back buttons for error pages
  * Dependencies: express, body-parser, express-session, bcrypt, axios
  * Data: users.json, games.json
  */
@@ -76,12 +76,15 @@ function analyzeNoCommonDays(game) {
 }
 
 // Send Discord webhook for game session scheduling
-async function sendDiscordWebhook(game, selectedDay) {
+async function sendDiscordWebhook(game, selectedDay, mentionText = '') {
   if (!game.webhookUrl) return;
   
   try {
+    const baseMessage = `**Game Session Scheduled!**\n📅 Game: ${game.name}\n📆 Date: ${selectedDay}\n👥 Players: ${game.players.join(', ')}`;
+    const fullMessage = mentionText ? `${mentionText}\n\n${baseMessage}` : baseMessage;
+    
     await axios.post(game.webhookUrl, {
-      content: `**Game Session Scheduled!**\n📅 Game: ${game.name}\n📆 Date: ${selectedDay}\n👥 Players: ${game.players.join(', ')}`
+      content: fullMessage
     });
   } catch (error) {
     console.error('Discord webhook error:', error.message);
@@ -136,7 +139,10 @@ function renderPage(title, bodyHtml, hideLogout = false) {
     .error-message{background:#ff5252;color:#fff;padding:1rem;border-radius:4px;margin:1rem 0;}
     .schedule-form{margin-top:1rem;padding:1rem;background:#1e1e1e;border-radius:4px;}
     .schedule-form select{margin-right:.5rem;padding:.5rem;background:#2a2a2a;color:#eee;border:none;border-radius:4px;}
+    .schedule-form input{margin:.5rem 0;padding:.5rem;background:#2a2a2a;color:#eee;border:none;border-radius:4px;width:100%;}
     .webhook-input{width:100%;margin:.5rem 0;padding:.5rem;background:#1e1e1e;color:#eee;border:1px solid #333;border-radius:4px;}
+    .mention-input{width:100%;margin:.5rem 0;padding:.5rem;background:#2a2a2a;color:#eee;border:1px solid #333;border-radius:4px;}
+    .matching-day{color:#4A90E2 !important;}
     /* Effects */
     .effect-snow{position:relative;}
     .effect-snow::before,.effect-snow::after{content:'❄';position:absolute;top:0;font-size:1.2rem;opacity:0;animation:snowFall 2s linear infinite;}
@@ -418,7 +424,8 @@ app.get('/gm/game/:id', requireLogin, requireGM, (req, res) => {
     <ul>`;
   
   Object.entries(votesObj).forEach(([u, ds]) => {
-    html += `<li>${u}: ${ds.join(', ')}</li>`;
+    const playerDays = ds.map(day => common.includes(day) ? `<span class="matching-day">${day}</span>` : day);
+    html += `<li>${u}: ${playerDays.join(', ')}</li>`;
   });
   
   html += '</ul><hr>';
@@ -436,6 +443,7 @@ app.get('/gm/game/:id', requireLogin, requireGM, (req, res) => {
           ${common.map(day => `<option value="${day}" ${game.scheduledDay === day ? 'selected' : ''}>${day}</option>`).join('')}
         </select>
       </label>
+      <input name="mentionText" placeholder="@mentions (e.g., @everyone or @role)" class="mention-input">
       <button>Schedule</button>
     </form>`;
     
@@ -479,7 +487,7 @@ app.post('/gm/game/:id/webhook', requireLogin, requireGM, (req, res) => {
 // Schedule a game session
 app.post('/gm/game/:id/schedule', requireLogin, requireGM, async (req, res) => {
   const id = req.params.id;
-  const { scheduledDay } = req.body;
+  const { scheduledDay, mentionText } = req.body;
   
   if (games[id] && games[id].owner === req.session.user) {
     games[id].scheduledDay = scheduledDay;
@@ -487,7 +495,7 @@ app.post('/gm/game/:id/schedule', requireLogin, requireGM, async (req, res) => {
     
     // Send Discord webhook notification if URL exists
     if (scheduledDay && games[id].webhookUrl) {
-      await sendDiscordWebhook(games[id], scheduledDay);
+      await sendDiscordWebhook(games[id], scheduledDay, mentionText || '');
     }
   }
   
