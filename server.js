@@ -2,7 +2,7 @@
  * server.js
  * TTRPG Date Picker with Auth, Multi-Game Support, GM Effects, User Management
  * Updated: Added "keep me logged in", common availability analysis, GM date selection, 
- *          Discord webhook integration with @mention support, blue matching days, and back buttons for error pages
+ *          Discord webhook integration with @mention support, color-coded matching days, and back buttons for error pages
  * Dependencies: express, body-parser, express-session, bcrypt, axios
  * Data: users.json, games.json
  */
@@ -27,6 +27,19 @@ const SESSION_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
 function loadJSON(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } }
 function saveJSON(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
 function intersect(arrays) { if (!arrays.length) return []; return arrays.reduce((a, b) => a.filter(x => b.includes(x))); }
+
+// New helper to get color based on match percentage
+function getMatchColor(matchCount, totalPlayers) {
+  if (totalPlayers === 0) return '#666';
+  const percentage = matchCount / totalPlayers;
+  
+  if (percentage === 1) return '#4CAF50'; // Green for 100% match
+  if (percentage >= 0.8) return '#8BC34A'; // Light green for 80%+
+  if (percentage >= 0.6) return '#FFEB3B'; // Yellow for 60%+
+  if (percentage >= 0.4) return '#FF9800'; // Orange for 40%+
+  if (percentage >= 0.2) return '#FF5722'; // Red-orange for 20%+
+  return '#F44336'; // Red for < 20%
+}
 
 // New helper to analyze why there's no common availability
 function analyzeNoCommonDays(game) {
@@ -143,6 +156,13 @@ function renderPage(title, bodyHtml, hideLogout = false) {
     .webhook-input{width:100%;margin:.5rem 0;padding:.5rem;background:#1e1e1e;color:#eee;border:1px solid #333;border-radius:4px;}
     .mention-input{width:100%;margin:.5rem 0;padding:.5rem;background:#2a2a2a;color:#eee;border:1px solid #333;border-radius:4px;}
     .matching-day{color:#4A90E2 !important;}
+    .day-selection{margin:1rem 0;padding:1rem;background:#1e1e1e;border-radius:4px;}
+    .day-option{display:inline-block;margin:.5rem;padding:.5rem 1rem;border-radius:4px;color:#fff;font-weight:bold;text-decoration:none;transition:transform .1s;}
+    .day-option:hover{transform:scale(1.05);}
+    .day-option:active{transform:scale(0.95);}
+    .selected-day{background:#4CAF50;color:#000;}
+    .schedule-button{background:#4CAF50;color:#fff;padding:.75rem 1.5rem;border:none;border-radius:4px;font-weight:bold;margin-top:1rem;cursor:pointer;}
+    .schedule-button:hover{background:#45a049;}
     /* Effects */
     .effect-snow{position:relative;}
     .effect-snow::before,.effect-snow::after{content:'❄';position:absolute;top:0;font-size:1.2rem;opacity:0;animation:snowFall 2s linear infinite;}
@@ -401,7 +421,17 @@ app.get('/gm/game/:id', requireLogin, requireGM, (req, res) => {
     `));
   }
   
-  const votesObj = game.votes || {}, common = intersect(Object.values(votesObj));
+  const votesObj = game.votes || {};
+  const allPlayers = Object.keys(votesObj);
+  const totalPlayers = allPlayers.length;
+  const common = intersect(Object.values(votesObj));
+  
+  // Calculate match counts for all voted days
+  const allDays = [...new Set(Object.values(votesObj).flat())];
+  const dayMatchCounts = {};
+  allDays.forEach(day => {
+    dayMatchCounts[day] = allPlayers.filter(player => votesObj[player].includes(day)).length;
+  });
   
   let html = `<h1 class="effect-${game.effect || 'none'} game-title">${game.name} (GM)</h1>
     <hr>
@@ -424,38 +454,55 @@ app.get('/gm/game/:id', requireLogin, requireGM, (req, res) => {
     <ul>`;
   
   Object.entries(votesObj).forEach(([u, ds]) => {
-    const playerDays = ds.map(day => common.includes(day) ? `<span class="matching-day">${day}</span>` : day);
+    const playerDays = ds.map(day => {
+      const matchCount = dayMatchCounts[day];
+      const color = getMatchColor(matchCount, totalPlayers);
+      return `<span style="color: ${color}; font-weight: bold;">${day}</span>`;
+    });
     html += `<li>${u}: ${playerDays.join(', ')}</li>`;
   });
   
   html += '</ul><hr>';
   
-  // Display common days or explain why there are none
-  if (common.length) {
-    html += `<h2 class="game-title">Common Days</h2>
-      <p>${common.join(', ')}</p>`;
+  // Show all available days with color coding and allow GM to select
+  if (allDays.length > 0) {
+    html += `<h2 class="game-title">Day Selection</h2>
+      <div class="day-selection">
+        <p>Choose a day to schedule the session:</p>
+        <form method="POST" action="/gm/game/${id}/schedule">`;
     
-    // Add a form to let the GM choose a date
-    html += `<form method="POST" action="/gm/game/${id}/schedule" class="schedule-form">
-      <label>Schedule Session: 
-        <select name="scheduledDay">
-          <option value="">Select a day...</option>
-          ${common.map(day => `<option value="${day}" ${game.scheduledDay === day ? 'selected' : ''}>${day}</option>`).join('')}
-        </select>
-      </label>
-      <input name="mentionText" placeholder="@mentions (e.g., @everyone or @role)" class="mention-input">
-      <button>Schedule</button>
-    </form>`;
+    allDays.forEach(day => {
+      const matchCount = dayMatchCounts[day];
+      const color = getMatchColor(matchCount, totalPlayers);
+      const isSelected = game.scheduledDay === day;
+      const selectedClass = isSelected ? ' selected-day' : '';
+      
+      html += `<label>
+        <input type="radio" name="scheduledDay" value="${day}" ${isSelected ? 'checked' : ''} style="display: none;">
+        <span class="day-option${selectedClass}" style="background-color: ${color}; color: ${color === '#FFEB3B' ? '#000' : '#fff'};">
+          ${day} (${matchCount}/${totalPlayers})
+        </span>
+      </label>`;
+    });
+    
+    html += `<br><input name="mentionText" placeholder="@mentions (e.g., @everyone or @role)" class="mention-input">
+      <br><button type="submit" class="schedule-button">Schedule Session</button>
+      </form>`;
     
     if (game.scheduledDay) {
-      html += `<p><strong>Currently scheduled for: ${game.scheduledDay}</strong></p>`;
+      html += `<p><strong>Currently scheduled for: <span style="color: ${getMatchColor(dayMatchCounts[game.scheduledDay], totalPlayers)};">${game.scheduledDay}</span></strong></p>`;
     }
     
-    html += '<hr>';
-  } else {
-    html += `<h2 class="game-title">No common availability</h2>
-      <p>${analyzeNoCommonDays(game)}</p>
-      <hr>`;
+    html += '</div><hr>';
+  }
+  
+  // Display common days analysis
+  if (common.length) {
+    html += `<h2 class="game-title">Perfect Match Days</h2>
+      <p style="color: #4CAF50; font-weight: bold;">${common.join(', ')}</p><hr>`;
+  } else if (totalPlayers > 0) {
+    html += `<h2 class="game-title">No Perfect Match</h2>
+      <p>${analyzeNoCommonDays(game)}</p><hr>`;
   }
   
   html += `<h3>Assign Player</h3>
@@ -473,6 +520,27 @@ app.get('/gm/game/:id', requireLogin, requireGM, (req, res) => {
   
   res.send(renderPage(game.name, html));
 });
+
+// Add JavaScript for day selection interactivity
+const daySelectionScript = `
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  const dayOptions = document.querySelectorAll('.day-option');
+  const radioInputs = document.querySelectorAll('input[name="scheduledDay"]');
+  
+  dayOptions.forEach((option, index) => {
+    option.addEventListener('click', function() {
+      // Clear all selected states
+      dayOptions.forEach(opt => opt.classList.remove('selected-day'));
+      radioInputs.forEach(radio => radio.checked = false);
+      
+      // Set current as selected
+      option.classList.add('selected-day');
+      radioInputs[index].checked = true;
+    });
+  });
+});
+</script>`;
 
 // Update webhook URL
 app.post('/gm/game/:id/webhook', requireLogin, requireGM, (req, res) => {
@@ -540,3 +608,4 @@ app.use((req, res) => {
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+    
