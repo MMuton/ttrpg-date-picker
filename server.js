@@ -93,7 +93,7 @@ async function sendDiscordWebhook(game, selectedDay, mentionText = '') {
   if (!game.webhookUrl) return;
   
   try {
-    const baseMessage = `**Game Session Scheduled!**\n📅 Game: ${game.name}\n📅 Day: Next ${selectedDay}\n👥 Players: ${game.players.join(', ')}`;
+    const baseMessage = `**Game Session Scheduled!**\n📅 Game: ${game.name}\n🗓️ Day: Next ${selectedDay}\n👥 Players: ${game.players.join(', ')}`;
     const fullMessage = mentionText ? `${mentionText}\n\n${baseMessage}` : baseMessage;
     
     await axios.post(game.webhookUrl, {
@@ -160,9 +160,14 @@ function renderPage(title, bodyHtml, hideLogout = false) {
     .day-option{display:inline-block;margin:.5rem;padding:.5rem 1rem;border-radius:4px;color:#fff;font-weight:bold;text-decoration:none;transition:transform .1s;}
     .day-option:hover{transform:scale(1.05);}
     .day-option:active{transform:scale(0.95);}
-    .selected-day {
-      background: #4CAF50;
-      color: #000;
+    /* TEMP: click‐selection glow */
+    .day-option.temp-selected {
+      border: 2px solid #2196F3;
+      box-shadow: 0 0 8px 2px rgba(33, 150, 243, 0.7);
+    }
+
+    /* PERSISTED scheduled glow */
+    .day-option.persist-selected {
       border: 2px solid #4CAF50;
       box-shadow: 0 0 8px 2px rgba(76, 175, 80, 0.7);
     }
@@ -480,7 +485,7 @@ app.get('/gm/game/:id', requireLogin, requireGM, (req, res) => {
       const matchCount = dayMatchCounts[day];
       const color = getMatchColor(matchCount, totalPlayers);
       const isSelected = game.scheduledDay === day;
-      const selectedClass = isSelected ? ' selected-day' : '';
+        const selectedClass = isSelected ? ' persist-selected' : '';
       
       html += `<label>
         <input type="radio" name="scheduledDay" value="${day}" ${isSelected ? 'checked' : ''} style="display: none;">
@@ -532,16 +537,12 @@ const daySelectionScript = `
 document.addEventListener('DOMContentLoaded', function() {
   const dayOptions = document.querySelectorAll('.day-option');
   const radioInputs = document.querySelectorAll('input[name="scheduledDay"]');
-  
-  dayOptions.forEach((option, index) => {
-    option.addEventListener('click', function() {
-      // Clear all selected states
-      dayOptions.forEach(opt => opt.classList.remove('selected-day'));
-      radioInputs.forEach(radio => radio.checked = false);
-      
-      // Set current as selected
-      option.classList.add('selected-day');
-      radioInputs[index].checked = true;
+  dayOptions.forEach((option, i) => {
+    option.addEventListener('click', () => {
+      dayOptions.forEach(o => o.classList.remove('temp-selected'));
+      radioInputs.forEach(r => r.checked = false);
+      option.classList.add('temp-selected');
+      radioInputs[i].checked = true;
     });
   });
 });
