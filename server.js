@@ -1,8 +1,9 @@
 /*
  * server.js
  * TTRPG Date Picker with Auth, Multi-Game Support, GM Effects, User Management
- * Updated: Added email verification, "keep me logged in", and availability explanation
- * Dependencies: express, body-parser, express-session, bcrypt, nodemailer, crypto
+ * Updated: Added "keep me logged in", common availability analysis, GM date selection, 
+ *          Discord webhook integration, and back buttons for error pages
+ * Dependencies: express, body-parser, express-session, bcrypt, axios
  * Data: users.json, games.json
  */
 
@@ -12,8 +13,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const fs = require('fs');
 const path = require('path');
-const nodemailer = require('nodemailer');
-const crypto = require('crypto');
+const axios = require('axios'); // Added for Discord webhook support
 
 // Config
 const USERS_FILE = path.join(__dirname, 'users.json');
@@ -21,72 +21,71 @@ const GAMES_FILE = path.join(__dirname, 'games.json');
 const SESSION_SECRET = '54324356345453';
 const GM_SECRET = 'yatameansyarraktassak';
 const SALT_ROUNDS = 10;
-const COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
-
-// Configure email transporter (replace with your SMTP settings)
-const transporter = nodemailer.createTransport({
-  host: 'smtp.example.com',
-  port: 587,
-  secure: false,
-  auth: {
-    user: 'your-email@example.com',
-    pass: 'your-email-password'
-  }
-});
+const SESSION_MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
 
 // Helpers
 function loadJSON(file) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } }
 function saveJSON(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
 function intersect(arrays) { if (!arrays.length) return []; return arrays.reduce((a, b) => a.filter(x => b.includes(x))); }
-function generateToken() { return crypto.randomBytes(32).toString('hex'); }
-function findNoCommonDaysReason(game) {
-  const votesObj = game.votes || {};
-  const playerVotes = Object.entries(votesObj);
+
+// New helper to analyze why there's no common availability
+function analyzeNoCommonDays(game) {
+  const votes = game.votes || {};
+  const players = Object.keys(votes);
   
-  // If no votes yet
-  if (playerVotes.length === 0) {
-    return "No players have submitted their availability yet.";
+  if (players.length === 0) {
+    return "No players have voted yet.";
   }
   
-  // If only one player voted
-  if (playerVotes.length === 1) {
-    return `Only ${playerVotes[0][0]} has submitted availability so far.`;
+  if (players.length === 1) {
+    return `Only ${players[0]} has voted so far.`;
   }
   
-  // Check for players with no days selected
-  const emptyVotePlayers = playerVotes.filter(([_, days]) => days.length === 0).map(([player]) => player);
-  if (emptyVotePlayers.length > 0) {
-    return `${emptyVotePlayers.join(', ')} ${emptyVotePlayers.length === 1 ? 'has' : 'have'} not selected any available days.`;
+  // Find all unique days that have been voted for
+  const allDays = [...new Set(Object.values(votes).flat())];
+  if (allDays.length === 0) {
+    return "Players haven't selected any days.";
   }
   
-  // For each day, identify which players are NOT available
-  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  const dayMissingPlayers = {};
-  
-  days.forEach(day => {
-    const unavailablePlayers = playerVotes
-      .filter(([_, availableDays]) => !availableDays.includes(day))
-      .map(([player]) => player);
-    
-    if (unavailablePlayers.length === playerVotes.length) {
-      dayMissingPlayers[day] = "all players";
-    } else {
-      dayMissingPlayers[day] = unavailablePlayers;
-    }
+  // Check which days are missing for each player
+  const missingDaysByPlayer = {};
+  allDays.forEach(day => {
+    players.forEach(player => {
+      if (!votes[player].includes(day)) {
+        missingDaysByPlayer[day] = missingDaysByPlayer[day] || [];
+        missingDaysByPlayer[day].push(player);
+      }
+    });
   });
   
-  // Find days with the fewest missing players
-  const minMissing = Math.min(...Object.values(dayMissingPlayers).map(p => typeof p === 'string' ? Infinity : p.length));
-  const bestDays = Object.entries(dayMissingPlayers)
-    .filter(([_, players]) => typeof players !== 'string' && players.length === minMissing)
-    .map(([day, players]) => ({ day, players }));
+  // Find days that are closest to being common (have the most votes)
+  const dayVoteCounts = {};
+  allDays.forEach(day => {
+    dayVoteCounts[day] = players.filter(player => votes[player].includes(day)).length;
+  });
   
-  if (bestDays.length > 0) {
-    const example = bestDays[0];
-    return `Best option is ${example.day} but ${example.players.join(' and ')} ${example.players.length === 1 ? 'is' : 'are'} not available.`;
+  const maxVotes = Math.max(...Object.values(dayVoteCounts));
+  const closestDays = Object.keys(dayVoteCounts).filter(day => dayVoteCounts[day] === maxVotes);
+  
+  if (closestDays.length === 1) {
+    const missingPlayers = missingDaysByPlayer[closestDays[0]].join(', ');
+    return `${closestDays[0]} is closest to working, but ${missingPlayers} ${missingDaysByPlayer[closestDays[0]].length > 1 ? 'are' : 'is'} not available.`;
+  } else {
+    return `No days work for everyone. Try ${closestDays.join(' or ')}, which have the most availability.`;
   }
+}
+
+// Send Discord webhook for game session scheduling
+async function sendDiscordWebhook(game, selectedDay) {
+  if (!game.webhookUrl) return;
   
-  return "No common days found among all players' schedules.";
+  try {
+    await axios.post(game.webhookUrl, {
+      content: `**Game Session Scheduled!**\n📅 Game: ${game.name}\n📆 Date: ${selectedDay}\n👥 Players: ${game.players.join(', ')}`
+    });
+  } catch (error) {
+    console.error('Discord webhook error:', error.message);
+  }
 }
 
 // Data stores
@@ -100,33 +99,13 @@ app.use(session({
   secret: SESSION_SECRET, 
   resave: false, 
   saveUninitialized: false,
-  cookie: { secure: false } // Set to true if using HTTPS
+  cookie: { maxAge: SESSION_MAX_AGE } // Add cookie max age for "keep me logged in"
 }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Auth middleware
-function requireLogin(req, res, next) { 
-  if (!req.session.user) return res.redirect('/login'); 
-  req.user = users[req.session.user]; 
-  next(); 
-}
-
-function requireGM(req, res, next) { 
-  if (!req.user.isGM) return res.status(403).send('Forbidden'); 
-  next(); 
-}
-
-function requireVerified(req, res, next) {
-  if (!req.user.verified) {
-    return res.send(renderPage('Verification Required', 
-      `<h1>Email Verification Required</h1>
-       <p>Please check your email and click the verification link.</p>
-       <form method="POST" action="/resend-verification">
-         <button>Resend Verification Email</button>
-       </form>`, true));
-  }
-  next();
-}
+function requireLogin(req, res, next) { if (!req.session.user) return res.redirect('/login'); req.user = users[req.session.user]; next(); }
+function requireGM(req, res, next) { if (!req.user.isGM) return res.status(403).send('Forbidden'); next(); }
 
 // HTML renderer
 function renderPage(title, bodyHtml, hideLogout = false) {
@@ -153,9 +132,11 @@ function renderPage(title, bodyHtml, hideLogout = false) {
     .gm-form { display: flex; flex-direction: column; gap: 1rem; align-items: center; }
     .gm-form input, .gm-form select { width: 80%; }
     .gm-form button { width: auto; padding: .5rem 1.5rem; }
-    .checkbox-container { display: flex; align-items: center; gap: 0.5rem; justify-content: center; }
-    .checkbox-container input { width: auto; }
-    .reason-box { background: rgba(255,255,255,0.1); padding: 1rem; border-radius: 4px; margin: 1rem 0; text-align: left; }
+    .checkbox-container{display:flex;align-items:center;justify-content:center;gap:.5rem;margin:.5rem 0;}
+    .error-message{background:#ff5252;color:#fff;padding:1rem;border-radius:4px;margin:1rem 0;}
+    .schedule-form{margin-top:1rem;padding:1rem;background:#1e1e1e;border-radius:4px;}
+    .schedule-form select{margin-right:.5rem;padding:.5rem;background:#2a2a2a;color:#eee;border:none;border-radius:4px;}
+    .webhook-input{width:100%;margin:.5rem 0;padding:.5rem;background:#1e1e1e;color:#eee;border:1px solid #333;border-radius:4px;}
     /* Effects */
     .effect-snow{position:relative;}
     .effect-snow::before,.effect-snow::after{content:'❄';position:absolute;top:0;font-size:1.2rem;opacity:0;animation:snowFall 2s linear infinite;}
@@ -187,8 +168,8 @@ app.get('/login', (req, res) => {
       <input name="login" placeholder="Username or Email" required>
       <input name="password" type="password" placeholder="Password" required>
       <div class="checkbox-container">
-        <input type="checkbox" name="rememberMe" id="rememberMe">
-        <label for="rememberMe">Keep me logged in</label>
+        <input type="checkbox" name="keepLoggedIn" id="keepLoggedIn">
+        <label for="keepLoggedIn">Keep me logged in</label>
       </div>
       <div class="btn-group">
         <button type="submit">Login</button>
@@ -200,30 +181,33 @@ app.get('/login', (req, res) => {
 });
 
 app.post('/login', async (req, res) => {
-  let { login, password, rememberMe } = req.body;
+  let { login, password, keepLoggedIn } = req.body;
   let uname = login;
-  
   if (login.includes('@')) {
     const f = Object.entries(users).find(([, u]) => u.email === login);
     if (f) uname = f[0];
   }
-  
   const u = users[uname];
   if (!u || !(await bcrypt.compare(password, u.hash))) {
-    return res.send('Invalid login');
+    return res.send(renderPage('Login Error', `
+      <div class="error-message">Invalid username or password</div>
+      <a href="/login" class="back-button">Back to Login</a>
+    `, true));
   }
   
   req.session.user = uname;
   
-  // If "Keep me logged in" is checked, extend session duration
-  if (rememberMe) {
-    req.session.cookie.maxAge = COOKIE_MAX_AGE;
+  // If "keep me logged in" is checked, set the cookie to persist
+  if (keepLoggedIn) {
+    req.session.cookie.maxAge = SESSION_MAX_AGE;
+  } else {
+    req.session.cookie.expires = false; // Session cookie (expires when browser closes)
   }
   
   res.redirect('/');
 });
 
-// Registration
+// Register
 app.get('/register', (req, res) => {
   const html = `<div class="login-container">
     <h1>Register</h1>
@@ -244,115 +228,32 @@ app.get('/register', (req, res) => {
 app.post('/register', async (req, res) => {
   const { username, email, password, gmsecret } = req.body;
   
-  // Check if username exists
   if (users[username]) {
-    return res.send('User exists');
+    return res.send(renderPage('Registration Error', `
+      <div class="error-message">Username already exists</div>
+      <a href="/register" class="back-button">Back to Registration</a>
+    `, true));
   }
   
   // Check if email is already in use
-  const emailExists = Object.values(users).some(user => user.email === email);
+  const emailExists = Object.values(users).some(u => u.email === email);
   if (emailExists) {
-    return res.send('Email already registered');
+    return res.send(renderPage('Registration Error', `
+      <div class="error-message">Email already in use</div>
+      <a href="/register" class="back-button">Back to Registration</a>
+    `, true));
   }
   
-  // Generate verification token
-  const verificationToken = generateToken();
-  
-  // Create user
   users[username] = {
     hash: await bcrypt.hash(password, SALT_ROUNDS),
     isGM: gmsecret === GM_SECRET,
     email,
-    games: [],
-    verified: false,
-    verificationToken
+    games: []
   };
   
   saveJSON(USERS_FILE, users);
-  
-  // Send verification email
-  const verificationLink = `http://localhost:3000/verify/${username}/${verificationToken}`;
-  
-  const mailOptions = {
-    from: 'your-email@example.com',
-    to: email,
-    subject: 'Verify your TTRPG Date Picker account',
-    html: `
-      <h1>TTRPG Date Picker</h1>
-      <p>Hello ${username},</p>
-      <p>Thank you for registering. Please click the link below to verify your email address:</p>
-      <p><a href="${verificationLink}">Verify Email</a></p>
-      <p>If you didn't register for this service, please ignore this email.</p>
-    `
-  };
-  
-  try {
-    await transporter.sendMail(mailOptions);
-    req.session.user = username;
-    res.redirect('/');
-  } catch (error) {
-    console.error('Error sending verification email:', error);
-    res.send('Registration successful but error sending verification email. Please contact support.');
-  }
-});
-
-// Email verification
-app.get('/verify/:username/:token', (req, res) => {
-  const { username, token } = req.params;
-  const user = users[username];
-  
-  if (!user || user.verificationToken !== token) {
-    return res.status(400).send('Invalid verification link');
-  }
-  
-  // Mark user as verified
-  user.verified = true;
-  delete user.verificationToken;
-  saveJSON(USERS_FILE, users);
-  
-  // Auto-login
   req.session.user = username;
   res.redirect('/');
-});
-
-app.post('/resend-verification', requireLogin, (req, res) => {
-  const username = req.session.user;
-  const user = users[username];
-  
-  if (user.verified) {
-    return res.redirect('/');
-  }
-  
-  // Generate new token if needed
-  if (!user.verificationToken) {
-    user.verificationToken = generateToken();
-    saveJSON(USERS_FILE, users);
-  }
-  
-  // Send verification email
-  const verificationLink = `http://localhost:3000/verify/${username}/${user.verificationToken}`;
-  
-  const mailOptions = {
-    from: 'your-email@example.com',
-    to: user.email,
-    subject: 'Verify your TTRPG Date Picker account',
-    html: `
-      <h1>TTRPG Date Picker</h1>
-      <p>Hello ${username},</p>
-      <p>Please click the link below to verify your email address:</p>
-      <p><a href="${verificationLink}">Verify Email</a></p>
-      <p>If you didn't register for this service, please ignore this email.</p>
-    `
-  };
-  
-  transporter.sendMail(mailOptions, (error) => {
-    if (error) {
-      console.error('Error sending verification email:', error);
-      res.send('Error sending verification email. Please try again later.');
-    } else {
-      res.redirect('/');
-    }
-  });
 });
 
 // Logout
@@ -362,7 +263,7 @@ app.get('/logout', requireLogin, (req, res) => {
 });
 
 // Dashboard
-app.get('/', requireLogin, requireVerified, (req, res) => {
+app.get('/', requireLogin, (req, res) => {
   const me = users[req.session.user];
   let html = `<h1>Welcome, ${req.session.user}</h1>`;
   
@@ -374,59 +275,49 @@ app.get('/', requireLogin, requireVerified, (req, res) => {
   }
   
   html += "<h2>Your Games</h2><ul>";
-  
   me.games.forEach(gid => {
     const eff = games[gid]?.effect || 'none';
     html += `<li><a href="${me.isGM ? '/gm/game' : '/game'}/${gid}" class="effect-${eff} game-title">${games[gid]?.name || ''}</a></li>`;
   });
-  
   html += "</ul>";
+  
   res.send(renderPage('Dashboard', html));
 });
 
 // Manage Users
-app.get('/gm/users', requireLogin, requireVerified, requireGM, (req, res) => {
-  let html = '<h1>User Management</h1><table><tr><th>Username</th><th>Email</th><th>Role</th><th>Verified</th><th>Actions</th></tr>';
-  
+app.get('/gm/users', requireLogin, requireGM, (req, res) => {
+  let html = '<h1>User Management</h1><table><tr><th>Username</th><th>Email</th><th>Role</th><th>Actions</th></tr>';
   Object.entries(users).forEach(([u, d]) => {
-    html += `<tr>
-      <td>${u}</td>
-      <td>${d.email}</td>
-      <td>${d.isGM ? 'GM' : 'Player'}</td>
-      <td>${d.verified ? '✓' : '✗'}</td>
-      <td><form method="POST" action="/gm/users/${u}/delete"><button>Delete</button></form></td>
-    </tr>`;
+    html += `<tr><td>${u}</td><td>${d.email}</td><td>${d.isGM ? 'GM' : 'Player'}</td><td><form method="POST" action="/gm/users/${u}/delete"><button>Delete</button></form></td></tr>`;
   });
-  
   html += '</table><a href="/" class="back-button">Back</a>';
   res.send(renderPage('Manage Users', html));
 });
 
-app.post('/gm/users/:username/delete', requireLogin, requireVerified, requireGM, (req, res) => {
+app.post('/gm/users/:username/delete', requireLogin, requireGM, (req, res) => {
   const u = req.params.username;
-  
   delete users[u];
-  
   Object.values(games).forEach(g => {
     g.players = g.players.filter(p => p !== u);
     delete g.votes[u];
   });
-  
   saveJSON(USERS_FILE, users);
   saveJSON(GAMES_FILE, games);
   res.redirect('/gm/users');
 });
 
 // Player vote
-app.get('/game/:id', requireLogin, requireVerified, (req, res) => {
+app.get('/game/:id', requireLogin, (req, res) => {
   const id = req.params.id, game = games[id];
-  
   if (!game || (!req.user.isGM && !req.user.games.includes(id))) {
-    return res.status(403).send('Forbidden');
+    return res.send(renderPage('Access Error', `
+      <div class="error-message">You don't have access to this game</div>
+      <a href="/" class="back-button">Back to Dashboard</a>
+    `));
   }
   
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  const userVotes = game.votes && game.votes[req.session.user] ? game.votes[req.session.user] : [];
+  const userVotes = (game.votes || {})[req.session.user] || [];
   
   let html = `<h1 class="effect-${game.effect || 'none'} game-title">Vote: ${game.name}</h1>
     <form method="POST" action="/game/${id}/vote">
@@ -438,25 +329,26 @@ app.get('/game/:id', requireLogin, requireVerified, (req, res) => {
     html += `<label><input type="checkbox" name="days" value="${d}" ${checked}><span>${d}</span></label>`;
   });
   
-  html += `</div><button>Submit</button></form>`;
+  html += `</div>
+    <button>Submit</button>
+    </form>
+    <a href="/" class="back-button">Back to Dashboard</a>`;
+  
   res.send(renderPage(game.name, html));
 });
 
-app.post('/game/:id/vote', requireLogin, requireVerified, (req, res) => {
+app.post('/game/:id/vote', requireLogin, (req, res) => {
   const id = req.params.id;
   let days = req.body.days || [];
-  
   if (!Array.isArray(days)) days = [days];
-  
   games[id].votes = games[id].votes || {};
   games[id].votes[req.body.name] = days;
-  
   saveJSON(GAMES_FILE, games);
   res.redirect('/');
 });
 
 // GM create
-app.get('/gm/create', requireLogin, requireVerified, requireGM, (req, res) => {
+app.get('/gm/create', requireLogin, requireGM, (req, res) => {
   const html = `<h1>Create Game</h1>
     <form method="POST" action="/gm/create" class="gm-form">
       <input name="name" placeholder="Game Name" required>
@@ -467,6 +359,7 @@ app.get('/gm/create', requireLogin, requireVerified, requireGM, (req, res) => {
         <option value="glitch">Glitch</option>
         <option value="swords">Swords</option>
       </select>
+      <input name="webhookUrl" placeholder="Discord Webhook URL (optional)" class="webhook-input">
       <button>Create</button>
     </form>
     <a href="/" class="back-button">Back</a>`;
@@ -474,41 +367,52 @@ app.get('/gm/create', requireLogin, requireVerified, requireGM, (req, res) => {
   res.send(renderPage('Create Game', html));
 });
 
-app.post('/gm/create', requireLogin, requireVerified, requireGM, (req, res) => {
+app.post('/gm/create', requireLogin, requireGM, (req, res) => {
   const gid = Date.now().toString();
-  
   games[gid] = {
     name: req.body.name,
     owner: req.session.user,
     votes: {},
     players: [],
-    effect: req.body.effect || 'none'
+    effect: req.body.effect || 'none',
+    webhookUrl: req.body.webhookUrl || null,
+    scheduledDay: null
   };
   
   users[req.session.user].games.push(gid);
-  
   saveJSON(USERS_FILE, users);
   saveJSON(GAMES_FILE, games);
   res.redirect('/');
 });
 
 // GM game dashboard
-app.get('/gm/game/:id', requireLogin, requireVerified, requireGM, (req, res) => {
+app.get('/gm/game/:id', requireLogin, requireGM, (req, res) => {
   const id = req.params.id, game = games[id];
-  
   if (!game || game.owner !== req.session.user) {
-    return res.status(403).send('Forbidden');
+    return res.send(renderPage('Access Error', `
+      <div class="error-message">You don't have access to this game</div>
+      <a href="/" class="back-button">Back to Dashboard</a>
+    `));
   }
   
-  const votesObj = game.votes || {};
-  const common = intersect(Object.values(votesObj));
+  const votesObj = game.votes || {}, common = intersect(Object.values(votesObj));
   
   let html = `<h1 class="effect-${game.effect || 'none'} game-title">${game.name} (GM)</h1>
     <hr>
     <div class="btn-group">
-      <form method="POST" action="/gm/game/${id}/reset"><button>Reset Votes</button></form>
-      <form method="POST" action="/gm/game/${id}/delete"><button>Delete Game</button></form>
+      <form method="POST" action="/gm/game/${id}/reset">
+        <button>Reset Votes</button>
+      </form>
+      <form method="POST" action="/gm/game/${id}/delete">
+        <button>Delete Game</button>
+      </form>
     </div>
+    <hr>
+    <h2 class="game-title">Webhook Settings</h2>
+    <form method="POST" action="/gm/game/${id}/webhook">
+      <input name="webhookUrl" class="webhook-input" placeholder="Discord Webhook URL" value="${game.webhookUrl || ''}">
+      <button>Update</button>
+    </form>
     <hr>
     <h2 class="game-title">Players</h2>
     <ul>`;
@@ -519,66 +423,110 @@ app.get('/gm/game/:id', requireLogin, requireVerified, requireGM, (req, res) => 
   
   html += '</ul><hr>';
   
+  // Display common days or explain why there are none
   if (common.length) {
-    html += `<h2 class="game-title">Common Days</h2><p>${common.join(', ')}</p><hr>`;
+    html += `<h2 class="game-title">Common Days</h2>
+      <p>${common.join(', ')}</p>`;
+    
+    // Add a form to let the GM choose a date
+    html += `<form method="POST" action="/gm/game/${id}/schedule" class="schedule-form">
+      <label>Schedule Session: 
+        <select name="scheduledDay">
+          <option value="">Select a day...</option>
+          ${common.map(day => `<option value="${day}" ${game.scheduledDay === day ? 'selected' : ''}>${day}</option>`).join('')}
+        </select>
+      </label>
+      <button>Schedule</button>
+    </form>`;
+    
+    if (game.scheduledDay) {
+      html += `<p><strong>Currently scheduled for: ${game.scheduledDay}</strong></p>`;
+    }
+    
+    html += '<hr>';
   } else {
-    const reason = findNoCommonDaysReason(game);
     html += `<h2 class="game-title">No common availability</h2>
-      <div class="reason-box">${reason}</div><hr>`;
+      <p>${analyzeNoCommonDays(game)}</p>
+      <hr>`;
   }
   
   html += `<h3>Assign Player</h3>
     <form method="POST" action="/gm/game/${id}/assign">
       <select name="username">`;
   
-  Object.keys(users)
-    .filter(u => !game.players.includes(u))
-    .forEach(u => html += `<option>${u}</option>`);
+  Object.keys(users).filter(u => !game.players.includes(u)).forEach(u => {
+    html += `<option>${u}</option>`;
+  });
   
   html += `</select>
-      <button>Add Player</button>
+    <button>Add Player</button>
     </form>
     <a href="/" class="back-button">Back</a>`;
   
   res.send(renderPage(game.name, html));
 });
 
-app.post('/gm/game/:id/assign', requireLogin, requireVerified, requireGM, (req, res) => {
-  const id = req.params.id, u = req.body.username;
-  
-  if (games[id] && !games[id].players.includes(u)) {
-    games[id].players.push(u);
-    users[u].games.push(id);
-    
-    saveJSON(USERS_FILE, users);
+// Update webhook URL
+app.post('/gm/game/:id/webhook', requireLogin, requireGM, (req, res) => {
+  const id = req.params.id;
+  if (games[id] && games[id].owner === req.session.user) {
+    games[id].webhookUrl = req.body.webhookUrl || null;
     saveJSON(GAMES_FILE, games);
+  }
+  res.redirect(`/gm/game/${id}`);
+});
+
+// Schedule a game session
+app.post('/gm/game/:id/schedule', requireLogin, requireGM, async (req, res) => {
+  const id = req.params.id;
+  const { scheduledDay } = req.body;
+  
+  if (games[id] && games[id].owner === req.session.user) {
+    games[id].scheduledDay = scheduledDay;
+    saveJSON(GAMES_FILE, games);
+    
+    // Send Discord webhook notification if URL exists
+    if (scheduledDay && games[id].webhookUrl) {
+      await sendDiscordWebhook(games[id], scheduledDay);
+    }
   }
   
   res.redirect(`/gm/game/${id}`);
 });
 
-app.post('/gm/game/:id/reset', requireLogin, requireVerified, requireGM, (req, res) => {
-  const id = req.params.id;
-  
-  games[id].votes = {};
-  saveJSON(GAMES_FILE, games);
-  
+app.post('/gm/game/:id/assign', requireLogin, requireGM, (req, res) => {
+  const id = req.params.id, u = req.body.username;
+  if (games[id] && !games[id].players.includes(u)) {
+    games[id].players.push(u);
+    users[u].games.push(id);
+    saveJSON(USERS_FILE, users);
+    saveJSON(GAMES_FILE, games);
+  }
   res.redirect(`/gm/game/${id}`);
 });
 
-app.post('/gm/game/:id/delete', requireLogin, requireVerified, requireGM, (req, res) => {
+app.post('/gm/game/:id/reset', requireLogin, requireGM, (req, res) => {
   const id = req.params.id;
-  
+  games[id].votes = {};
+  saveJSON(GAMES_FILE, games);
+  res.redirect(`/gm/game/${id}`);
+});
+
+app.post('/gm/game/:id/delete', requireLogin, requireGM, (req, res) => {
+  const id = req.params.id;
   delete games[id];
-  
-  Object.values(users).forEach(u => {
-    u.games = u.games.filter(gid => gid !== id);
-  });
-  
+  Object.values(users).forEach(u => u.games = u.games.filter(gid => gid !== id));
   saveJSON(GAMES_FILE, games);
   saveJSON(USERS_FILE, users);
-  
   res.redirect('/');
+});
+
+// Error handler for route not found
+app.use((req, res) => {
+  res.status(404).send(renderPage('Page Not Found', `
+    <div class="error-message">The page you're looking for doesn't exist</div>
+    <a href="/" class="back-button">Back to Dashboard</a>
+  `));
 });
 
 // Start server
